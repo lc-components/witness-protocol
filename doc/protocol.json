@@ -1,0 +1,46 @@
+{
+  "document": {
+    "encryption": {
+      "algorithm": "RSA",
+      "pubKey": "PUBLICKEY_DOC"
+    },
+    "data": "BASE64"
+  },
+  "underwriters": [
+    {
+      "pubKey": "PUBLICKEY_A",
+      "documentKey": {
+        "encryption": {
+          "algorithm": "RSA",
+          "pubKey": "PUBLICKEY_A"
+        },
+        "data": "BASE64"
+      },
+      "personData": {
+        "encryption": {
+          "algorithm": "RSA",
+          "pubKey": "PUBLICKEY_A"
+        },
+        "data": "BASE64"
+      }
+    },
+    {
+      "pubKey": "PUBLICKEY_B",
+      "documentKey": {
+        "encryption": {
+          "algorithm": "RSA",
+          "pubKey": "PUBLICKEY_B"
+        },
+        "data": "BASE64"
+      },
+      "personData": {
+        "encryption": {
+          "algorithm": "RSA",
+          "pubKey": "PUBLICKEY_A"
+        },
+        "data": "BASE64"
+      }
+    }
+
+  ]
+}
