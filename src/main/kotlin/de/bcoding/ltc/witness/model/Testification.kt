@@ -5,7 +5,6 @@ import java.time.LocalDateTime
 class Testified<T>(
     val content: T,
     val time: LocalDateTime,
-    val signingParty: PublicKey,
     val signature: Signature
 )
 
@@ -13,38 +12,31 @@ class BrowserData(val browser: String, val os: String)
 
 class ProtocolCreation(
     val ipAddress: String,
-    val encryptedDocumentHash: HashCode
-)
-
-class DocumentDownload(
-    val ipAddress: String,
     val encryptedDocumentHash: HashCode,
-    val editorAppHash: HashCode
+    val protocolKey: String
 )
 
+class DocumentSeen(
+    val ipAddress: String,
+    val encryptedDocumentHash: HashCode, // this is set by the witness to testify which data was given out
+    val editorAppHash: HashCode,
+    val secret: Encrypted<String>,
+    signerPubKey: PublicKey
+)
 
-class Underwriting(
+class SigningRequestTransmission(
+    val recipientEmail: String,
+    val recipientPublicKey: PublicKey,
+    val secret: String,
+    val protocolKey: String
+)
+
+class DocumentSignature(
+    val ipAddress: String,
+    val uploader: PublicKey,
+    val secret: Encrypted<String>,
     val documentHash: HashCode,
     val editorAppHash: HashCode,
     val editorUri: String,
     val browser: Encrypted<BrowserData>
-)
-
-
-class UnderwritingRequestTransmission(
-    val recipientEmail: String,
-    val recipientPublicKey: PublicKey,
-    /**
-     * contains a secret encrypted with the public key of recipient
-     */
-    val secret: Encrypted<String>
-)
-
-class UnderwritingUpload(
-    val ipAddress: String,
-    val uploader: PublicKey,
-    /**
-     * contains a the secret from the UnderwritingRequestTransmissionProtocol, encrypted with the public key of the email sender
-     */
-    val secret: Encrypted<String>
 )
