@@ -1,220 +1,261 @@
 package de.bcoding.ltc.witness
 
 import de.bcoding.ltc.witness.model.*
-import de.bcoding.ltc.witness.model.Crypto.Companion.calculateHashCode
-import de.bcoding.ltc.witness.model.Crypto.Companion.decrypt
-import de.bcoding.ltc.witness.model.Crypto.Companion.encrypt
+import de.bcoding.ltc.witness.serialization.Data
+import kotlinx.serialization.ImplicitReflectionSerializer
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonConfiguration
+import kotlinx.serialization.modules.SerializersModule
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.TestInstance
-import java.security.KeyPairGenerator
 import kotlin.reflect.KClass
 
+@ImplicitReflectionSerializer
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class ImplementationTest {
-    private val witness: Witness = Witness(CryptoId().pair)
 
     private val storage: Storage = object : Storage {
+
+        val protocols = HashMap<String, Protocol>()
+
         override fun createProtocol(key: String, protocol: Protocol) {
-            TODO("not implemented") //To change body of created functions use File | Settings | File Templates.
+            protocols[key] = protocol
         }
 
         override fun getProtocol(protocolKey: String): Protocol {
-            TODO("not implemented") //To change body of created functions use File | Settings | File Templates.
+            return protocols[protocolKey]!!
         }
 
         override fun saveProtocol(protocol: Protocol) {
-            TODO("not implemented") //To change body of created functions use File | Settings | File Templates.
+            protocols[protocol.key] = protocol
         }
     }
 
-
-    val events = mutableListOf<Any>()
-
-    private val eventBus: EventBus = object: EventBus {
-
-        val listeners = mutableMapOf<KClass<*>, (Any) -> Unit>()
-
-        @Suppress("UNCHECKED_CAST")
-        override fun <T : Any> listenTo(kClass: KClass<T>, function: (T) -> Unit) {
-            listeners[kClass] = function as (Any) -> Unit
+    val messageModule = SerializersModule {
+        polymorphic(Any::class, ProtocolCreation::class, DocumentSeen::class) {
+            ProtocolCreation::class with ProtocolCreation.serializer()
+            DocumentSeen::class with DocumentSeen.serializer()
         }
-
-        override fun publish(event: Any) {
-            events.add(event)
-            if(listeners.containsKey(event::class)) {
-                listeners[event::class]!!.invoke(event)
-            }
-        }
-
     }
 
-    private val implementation = Implementation(
-        witness,
-        storage,
-        eventBus
+    private val crypto = TestCrypto(
+        Json(JsonConfiguration(prettyPrint = true, useArrayPolymorphism = true), messageModule)
     )
 
-    class CryptoId {
-        private val keyGen = KeyPairGenerator.getInstance("DSA", "SUN")
-        private val tmp = keyGen.generateKeyPair()
-        private val priv = tmp.private
-        private val pub = tmp.public
-        val pair = KeyPair(PublicKey(pub), PrivateKey(priv))
+    val wittnessKeyPair = CryptoId(crypto).pair
+    private val witness: Witness = Witness(wittnessKeyPair.publicKey)
+
+    class TestSetup(val witness: Witness, val storage: Storage, val crypto: Crypto) {
+
+        lateinit var protocolKey: String
+        val eventBus: EventBus = object : EventBus {
+
+            val listeners = mutableMapOf<KClass<*>, (Any) -> Unit>()
+
+            @Suppress("UNCHECKED_CAST")
+            override fun <T : Any> listenTo(kClass: KClass<T>, function: (T) -> Unit) {
+                listeners[kClass] = function as (Any) -> Unit
+            }
+
+            override fun publish(event: Any) {
+                events.add(event)
+                if (listeners.containsKey(event::class)) {
+                    listeners[event::class]!!.invoke(event)
+                }
+            }
+
+        }
+        val appHash = randomHash()
+        val documentCrypto = CryptoId(crypto)
+        val signerCrypto1 = CryptoId(crypto)
+        val signerCrypto2 = CryptoId(crypto)
+        val documentData = "test data".toByteArray()
+        val document = Document(Data(documentData))
+        val encryptedDocument = crypto.encrypt(documentCrypto.pair.publicKey, document)
+        val events = mutableListOf<Any>()
+
+        private fun randomHash(): HashCode {
+            return HashCode("md5", Data("asdf".toByteArray()))
+        }
+
+        fun getSigner1Keys(): KeyPair {
+            return signerCrypto1.pair
+        }
+
+        fun getSigner2Keys(): KeyPair {
+            return signerCrypto2.pair
+        }
+
+        fun getDocumentKeys(): KeyPair {
+            return documentCrypto.pair
+        }
+
+        fun checkDocumentSeen(signer1: Signer, transmissionSecret: String) {
+            // check DocumentSeen event and changes in protocol
+            assertThat(events.size).isEqualTo(1)
+            assertThat(events[0]).isInstanceOf(DocumentSeen::class.java)
+
+            val protocol = storage.getProtocol(protocolKey)
+            // check if document seen event if recorded in protocol
+            val signer = protocol.signers.findSigner(signer1.pubKey)!!
+            assertThat(signer.documentSeen).isNotNull
+            val documentSeen = crypto.decrypt(signer.documentSeen!!, documentCrypto.pair.privateKey)
+            assertThat(documentSeen.content.editorAppHash).isEqualTo(appHash)
+            assertThat(documentSeen.content.encryptedDocumentHash).isEqualTo(crypto.calculateHashCode(encryptedDocument))
+            assertThat(documentSeen.content.ipAddress).isEqualTo("8.3.4.3")
+            // signer1 encrypted the secret, check value
+            assertThat(transmissionSecret).isEqualTo(crypto.decrypt(documentSeen.content.secret, signer1.pubKey))
+            isSignedBy(documentSeen, witness.pubKey)
+        }
+
+        fun checkTransmission(signer1: Signer): String {
+            val messages = events.filterIsInstance(Message::class.java)
+            assertThat(messages.size).isEqualTo(1)
+            val transmission = signer1.signingRequestTransmission?.content
+            assertThat(transmission).isNotNull
+
+            val protocol = storage.getProtocol(protocolKey)
+            // check if transmission is recorded in protocol
+            val transmissionRecipient = protocol.signers.findSigner(transmission!!.recipientPublicKey)
+            assertThat(transmissionRecipient).isNotNull
+            val signingRequestTransmission = transmissionRecipient!!.signingRequestTransmission
+            assertThat(signingRequestTransmission).isNotNull
+            // should be signed by witness
+            isSignedBy(signingRequestTransmission!!, witness.pubKey)
+
+            // check transmission to signer1
+            assertThat(transmission.recipientEmail).isEqualTo(signer1.email)
+            assertThat(transmission.recipientPublicKey).isEqualTo(signer1.pubKey)
+            val transmissionSecret = transmission.secret
+            assertThat(transmissionSecret).isNotBlank()
+            assertThat(transmission.protocolKey).isEqualTo(protocol.key)
+            return transmissionSecret
+        }
+
+        fun checkCreation(protocol: Protocol) {
+            // creation protocol is encrypted using document public key
+            assertThat(protocol.creation.publicKey).isEqualTo(documentCrypto.pair.publicKey)
+            val creation = crypto.decrypt(protocol.creation, documentCrypto.pair.privateKey)
+            // witness should have signed the creation protocol
+            isSignedBy(creation, witness.pubKey)
+        }
+
+        private fun isSignedBy(testified: Testified<*>, publicKey: PublicKey) {
+            assertThat(testified.signature.publicKey).isEqualTo(publicKey)
+            // TODO: check signature
+        }
+
+        fun checkDocumentSignedBy(pubKey: PublicKey, privateKey: PrivateKey) {
+            val protocol = storage.getProtocol(protocolKey)
+            val signature = protocol.signers.findSigner(pubKey)!!.signature
+            assertThat(signature).isNotNull
+            val decrypted = crypto.decrypt(signature!!, privateKey)
+            isSignedBy(decrypted, pubKey)
+            // TODO: check data in signature
+        }
+    }
+
+    val setup = TestSetup(witness, storage, crypto)
+
+    private val implementation = Implementation(
+        wittnessKeyPair,
+        storage,
+        setup.eventBus,
+        crypto
+    )
+
+    class CryptoId(crypto: Crypto) {
+        val pair = crypto.createKeyPair()
     }
 
     @Test
     fun test() {
-        val appHash = randomHash()
 
         // start workflow component
-        Implementation.Workflow(eventBus, implementation, storage)
+        Implementation.Workflow(setup.eventBus, implementation, storage)
 
-        val documentCrypto = CryptoId()
+        val documentPrivateKey = setup.getDocumentKeys().privateKey
 
         // signer1
-        val signerCrypto1 = CryptoId()
+        val signer1PubKey = setup.getSigner1Keys().publicKey
+        val documentKeys = setup.getDocumentKeys()
         val signer1 = Signer(
             "hank@boki.com",
-            signerCrypto1.pair.publicKey,
-            encrypt(signerCrypto1.pair.publicKey, documentCrypto.pair.privateKey),
-            encrypt(documentCrypto.pair.publicKey, PersonData("Hank", "Boki", "ACME Inc."))
+            signer1PubKey,
+            crypto.encrypt(signer1PubKey, documentPrivateKey),
+            crypto.encrypt(documentKeys.publicKey, PersonData("Hank", "Boki", "ACME Inc."))
         )
 
         // signer2
-        val signerCrypto2 = CryptoId()
         val signer2 = Signer(
             "peter@fox.de",
-            signerCrypto2.pair.publicKey,
-            encrypt(signerCrypto2.pair.publicKey, documentCrypto.pair.privateKey),
-            encrypt(documentCrypto.pair.publicKey, PersonData("Peter", "Fox", "Test GmbH"))
+            setup.getSigner2Keys().publicKey,
+            crypto.encrypt(setup.getSigner2Keys().publicKey, documentPrivateKey),
+            crypto.encrypt(documentKeys.publicKey, PersonData("Peter", "Fox", "Test GmbH"))
         )
-
-        val documentData = "test data".toByteArray()
-        val document = Document(documentData)
-        val encryptedDocument = encrypt(documentCrypto.pair.publicKey, document)
 
         // document is uploaded
         val protocolKey =
             implementation.startProtocol(
-                encryptedDocument,
-                documentCrypto.pair.publicKey,
+                setup.encryptedDocument,
+                documentKeys.publicKey,
                 listOf(signer1, signer2),
                 RequestContext("134.76.1.45")
             )
+        setup.protocolKey = protocolKey
 
         // check if signer1 got a message
-        assertThat(events.size).isEqualTo(2)
-        assertThat(events[0]).isInstanceOf(ProtocolCreation::class.java)
+        assertThat(setup.events.size).isEqualTo(2)
+        assertThat(setup.events[0]).isInstanceOf(ProtocolCreation::class.java)
 
-        val protocolCreation = events[0] as ProtocolCreation
+        val protocolCreation = setup.events[0] as ProtocolCreation
 
-        var protocol = storage.getProtocol(protocolCreation.protocolKey)
-        checkCreation(protocol, documentCrypto)
+        val protocol = storage.getProtocol(protocolCreation.protocolKey)
+        setup.checkCreation(protocol)
 
-        assertThat(events[1]).isInstanceOf(SigningRequestTransmission::class.java)
+        var transmissionSecret = setup.checkTransmission(signer1)
 
-        val transmission = events[1] as SigningRequestTransmission
-        val transmissionSecret = checkTransmission(protocol, transmission, signer1)
+        setup.events.clear()
 
-        events.clear()
-
-        val encryptedSecret = encrypt(signerCrypto1.pair.privateKey, transmissionSecret)
-        implementation.protocolDownload(protocolKey,
+        val encryptedSecret = crypto.encrypt(setup.getSigner1Keys(), transmissionSecret)
+        implementation.protocolDownload(
+            protocolKey,
             encryptedSecret,
             signer1.pubKey,
             RequestContext("8.3.4.3"),
-            appHash
-            )
+            setup.appHash
+        )
 
-        checkDocumentSeen(
-            protocol,
-            protocolKey,
+        setup.checkDocumentSeen(
             signer1,
-            documentCrypto,
-            appHash,
-            encryptedDocument,
             transmissionSecret
         )
 
-        events.clear()
-        implementation.signDocument(protocolKey, encryptedSecret, signer1.pubKey,
-            RequestContext("8.3.4.3"), appHash, calculateHashCode(document),
+        setup.events.clear()
+        implementation.signDocument(
+            protocolKey, signer1.pubKey,
+            RequestContext("8.3.4.3"), setup.appHash,
+            crypto.calculateHashCode(setup.document),
             "https://some.uri/....",
-            encrypt(documentCrypto.pair.publicKey, BrowserData("chrome", "linux"))
-            )
+            crypto.encrypt(documentKeys.publicKey, BrowserData("chrome", "linux"))
+        )
+
+        setup.checkDocumentSignedBy(signer1.pubKey, setup.signerCrypto1.pair.privateKey)
+
+        // request should have been sent to signer2
+        transmissionSecret = setup.checkTransmission(signer2)
+        implementation.protocolDownload(
+            protocolKey,
+            encryptedSecret,
+            signer1.pubKey,
+            RequestContext("8.3.4.3"),
+            setup.appHash
+        )
 
         // TODO: complete test
     }
 
-    private fun checkDocumentSeen(
-        protocol: Protocol,
-        protocolKey: String,
-        signer1: Signer,
-        documentCrypto: CryptoId,
-        appHash: HashCode,
-        encryptedDocument: Encrypted<Document>,
-        transmissionSecret: String
-    ) {
-        // check DocumentSeen event and changes in protocol
-        var protocol = protocol
-        assertThat(events.size).isEqualTo(1)
-        assertThat(events[0]).isInstanceOf(DocumentSeen::class.java)
-
-        protocol = storage.getProtocol(protocolKey)
-        // check if document seen event if recorded in protocol
-        val signer = protocol.signers.findSigner(signer1.pubKey)!!
-        assertThat(signer.documentSeen).isNotNull()
-        val documentSeen = decrypt(signer.documentSeen!!, documentCrypto.pair.privateKey)
-        assertThat(documentSeen.content.editorAppHash).isEqualTo(appHash)
-        assertThat(documentSeen.content.encryptedDocumentHash).isEqualTo(Crypto.calculateHashCode(encryptedDocument))
-        assertThat(documentSeen.content.ipAddress).isEqualTo("8.3.4.3")
-        // signer1 encrypted the secret, check value
-        assertThat(transmissionSecret).isEqualTo(decrypt(documentSeen.content.secret, signer1.pubKey))
-        isSignedBy(documentSeen, witness.keyPair.publicKey)
-    }
-
-    private fun checkTransmission(
-        protocol: Protocol,
-        transmission: SigningRequestTransmission,
-        signer1: Signer
-    ): String {
-        // check if transmission is recorded in protocol
-        val transmissionRecipient = protocol.signers.findSigner(transmission.recipientPublicKey)
-        assertThat(transmissionRecipient).isNotNull
-        val signingRequestTransmission = transmissionRecipient!!.signingRequestTransmission
-        assertThat(signingRequestTransmission).isNotNull
-        // should be signed by witness
-        isSignedBy(signingRequestTransmission!!, witness.keyPair.publicKey)
-
-        // check transmission to signer1
-        assertThat(transmission.recipientEmail).isEqualTo(signer1.email)
-        assertThat(transmission.recipientPublicKey).isEqualTo(signer1.pubKey)
-        val transmissionSecret = transmission.secret
-        assertThat(transmissionSecret).isNotBlank()
-        assertThat(transmission.protocolKey).isEqualTo(protocol.key)
-        return transmissionSecret
-    }
-
-    private fun checkCreation(
-        protocol: Protocol,
-        documentCrypto: CryptoId
-    ) {
-        // creation protocol is encrypted using document public key
-        assertThat(protocol.creation.publicKey).isEqualTo(documentCrypto.pair.publicKey)
-        val creation = decrypt(protocol.creation, documentCrypto.pair.privateKey)
-        // witness should have signed the creation protocol
-        isSignedBy(creation, witness.keyPair.publicKey)
-    }
-
-    private fun isSignedBy(testified: Testified<*>, publicKey: PublicKey) {
-        assertThat(testified.signature.publicKey).isEqualTo(publicKey)
-        // TODO: check signature
-    }
-
-    private fun randomHash(): HashCode {
-        TODO("not implemented") //To change body of created functions use File | Settings | File Templates.
-    }
 
 }
 

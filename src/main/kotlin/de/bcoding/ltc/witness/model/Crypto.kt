@@ -1,74 +1,65 @@
 package de.bcoding.ltc.witness.model
 
-class HashCode(val bytes: ByteArray) {
-    fun toByteArray(): ByteArray {
-        TODO("not implemented") //To change body of created functions use File | Settings | File Templates.
-    }
-}
+import de.bcoding.ltc.witness.serialization.Data
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonConfiguration
+import kotlin.reflect.KClass
 
-class Signature(
-    data: HashCode,
-    accessKey: PublicKey
-) : Encrypted<HashCode>(true, data.toByteArray(), accessKey)
+@Serializable
+data class HashCode(val algorithm: String, val data: Data)
+
+val json = Json(JsonConfiguration.Stable)
+
+@Serializable
+data class Signature(
+    val hashCode: HashCode,
+    val accessKey: PublicKey
+) : Encrypted<HashCode>(
+    false,
+    Data(json.stringify(HashCode.serializer(), hashCode).toByteArray()),
+    accessKey,
+    HashCode::class
+)
+
 
 /**
  * data contains a serialized version of the object
  */
-open class Encrypted<OBJ>(
+@Serializable
+open class Encrypted<OBJ : Any>(
     val isPublicKeyEncrypted: Boolean,
-    val data: ByteArray,
-    val publicKey: PublicKey
-) : Data {
-    override fun toByteArray(): ByteArray {
-        return data
+    val data: Data,
+    val publicKey: PublicKey,
+    @Transient
+    var type: KClass<OBJ>? = null
+) {
+    fun decrypt(key: PrivateKey, crypto: Crypto): OBJ {
+        return crypto.decrypt(this, key)
     }
 }
 
-class PublicKey(val key: java.security.PublicKey)
-class PrivateKey(val key: java.security.PrivateKey)
+@Serializable
+data class PublicKey(val algorithm: String, val key: Data)
 
+@Serializable
+data class PrivateKey(val algorithm: String, val key: Data)
+
+@Serializable
 class KeyPair(
     val publicKey: PublicKey,
     val privateKey: PrivateKey
 )
 
-class Crypto {
-    companion object {
-
-
-        @JvmStatic
-        fun <T> decrypt(encrypted: Encrypted<T>, pubKey: PublicKey): T {
-            TODO("not implemented")
-        }
-
-        @JvmStatic
-        fun <T> decrypt(encrypted: Encrypted<T>, pubKey: PrivateKey): T {
-            TODO("not implemented")
-        }
-
-        @JvmStatic
-        fun <T> encrypt(pubKey: PublicKey, subject: T): Encrypted<T> {
-            TODO("not implemented")
-        }
-
-        @JvmStatic
-        fun <T> encrypt(pubKey: PrivateKey, subject: T): Encrypted<T> {
-            TODO("not implemented")
-        }
-
-        @JvmStatic
-        fun randomString(size: Int): String {
-            TODO("not implemented")
-        }
-
-        @JvmStatic
-        fun calculateHashCode(subject: Data): HashCode {
-            TODO("not implemented")
-        }
-
-        @JvmStatic
-        fun <T> testify(subject: T): Testified<T> {
-            TODO("not implemented")
-        }
-    }
+interface Crypto {
+    fun <T : Any> decrypt(encrypted: Encrypted<T>, pubKey: PublicKey): T
+    fun <T : Any> decrypt(encrypted: Encrypted<T>, pubKey: PrivateKey): T
+    fun <T : Any> encrypt(pubKey: PublicKey, subject: T): Encrypted<T>
+    fun <T : Any> encrypt(keys: KeyPair, subject: T): Encrypted<T>
+    fun randomString(size: Int): String
+    fun calculateHashCode(document: Encrypted<*>): HashCode
+    fun calculateHashCode(document: Document): HashCode
+    fun <T : Any> testify(subject: T, keys: KeyPair): Testified<T>
+    fun createKeyPair(): KeyPair
 }

@@ -1,16 +1,12 @@
 package de.bcoding.ltc.witness
 
 import de.bcoding.ltc.witness.model.*
-import de.bcoding.ltc.witness.model.Crypto.Companion.calculateHashCode
-import de.bcoding.ltc.witness.model.Crypto.Companion.decrypt
-import de.bcoding.ltc.witness.model.Crypto.Companion.encrypt
-import de.bcoding.ltc.witness.model.Crypto.Companion.randomString
-import de.bcoding.ltc.witness.model.Crypto.Companion.testify
 
 class Implementation(
-    val witness: Witness,
+    val witnessKeyPair: KeyPair,
     private val storage: Storage,
-    private val eventBus: EventBus
+    private val eventBus: EventBus,
+    private val crypto: Crypto
 ) {
 
     companion object {
@@ -24,7 +20,6 @@ class Implementation(
         storage: Storage
     ) {
         init {
-
             // TODO: notify other party about completed process or send message to next signer
             eventBus.listenTo(DocumentSignedEvent::class) {
 
@@ -48,7 +43,6 @@ class Implementation(
         }
     }
 
-
     fun startProtocol(
         document: Encrypted<Document>,
         protocolAccessKey: PublicKey,
@@ -56,20 +50,22 @@ class Implementation(
         context: RequestContext
     ): String {
 
+        val witness = Witness(witnessKeyPair.publicKey)
 
-        val key = randomString(PROTOCOL_KEY_SIZE)
+        val key = crypto.randomString(PROTOCOL_KEY_SIZE)
         val protocolCreation = ProtocolCreation(
             context.ipAddress,
-            calculateHashCode(document),
+            crypto.calculateHashCode(document),
             key
         )
 
-        val testifiedProtocol: Encrypted<Testified<ProtocolCreation>> = encrypt(
+        val testifiedProtocol: Encrypted<Testified<ProtocolCreation>> = crypto.encrypt(
             protocolAccessKey,
-            testify(protocolCreation)
+            crypto.testify(protocolCreation, witnessKeyPair)
         )
 
-        val protocol = Protocol(key,
+        val protocol = Protocol(
+            key,
             protocolAccessKey, document, witness, signers,
             testifiedProtocol
         )
@@ -81,31 +77,31 @@ class Implementation(
         return key
     }
 
-    fun sendToSigner(protocolKey: String, signerPubKey: PublicKey) {
-        val protocol = storage.getProtocol(protocolKey)
-        val signer = protocol.signers.first { it.pubKey == signerPubKey }
+    fun sendToSigner(protocolKey: String, signerPubKey: PublicKey) =
+        changeProtocol(protocolKey) { protocol ->
 
-        val transmissionSecret = randomString(TRANSMISSION_SECRET_SIZE)
+            val signer = protocol.signers.first { it.pubKey == signerPubKey }
 
-        signer.signingRequestTransmission = testify(
-            SigningRequestTransmission(
-                signer.email,
-                signer.pubKey,
-                transmissionSecret,
-                protocolKey
+            val transmissionSecret = crypto.randomString(TRANSMISSION_SECRET_SIZE)
+
+            signer.signingRequestTransmission = crypto.testify(
+                SigningRequestTransmission(
+                    signer.email,
+                    signer.pubKey,
+                    transmissionSecret,
+                    protocolKey
+                ), witnessKeyPair
             )
-        )
-        storage.saveProtocol(protocol)
 
-        eventBus.publish(
-            Message(
-                signer.email, MessageTemplate.SIGNING_REQUEST, mapOf(
-                    MessageVariable.PROTOCOL_KEY to protocolKey,
-                    MessageVariable.ENCRYPTED_SECRET to encrypt(signer.pubKey, transmissionSecret)
+            eventBus.publish(
+                Message(
+                    signer.email, MessageTemplate.SIGNING_REQUEST, mapOf(
+                        MessageVariable.PROTOCOL_KEY to protocolKey,
+                        MessageVariable.ENCRYPTED_SECRET to crypto.encrypt(signer.pubKey, transmissionSecret)
+                    )
                 )
             )
-        )
-    }
+        }
 
     fun protocolDownload(
         protocolKey: String,
@@ -114,69 +110,69 @@ class Implementation(
         context: RequestContext,
         editorAppHash: HashCode
     ): Protocol {
+        return changeProtocol(protocolKey) { protocol ->
+            val signer = protocol.signers.first { it.pubKey == signerPubKey }
 
-        val protocol = storage.getProtocol(protocolKey)
-        val signer = protocol.signers.first { it.pubKey == signerPubKey }
+            checkStatusAndSecret(signer, encryptedSecret)
 
-        checkStatusAndSecret(signer, encryptedSecret)
-
-        val documentSeen = DocumentSeen(
-            context.ipAddress,
-            calculateHashCode(protocol.document),
-            editorAppHash,
-            encryptedSecret,
-            signerPubKey)
-        signer.documentSeen = encrypt(
-            protocol.protocolAccessPubKey, testify(documentSeen)
-        )
-
-        storage.saveProtocol(protocol)
-
-        eventBus.publish(documentSeen)
-        return protocol
+            val documentSeen = DocumentSeen(
+                context.ipAddress,
+                crypto.calculateHashCode(protocol.document),
+                editorAppHash,
+                encryptedSecret,
+                signerPubKey
+            )
+            signer.documentSeen = crypto.encrypt(
+                protocol.protocolAccessPubKey, crypto.testify(documentSeen, witnessKeyPair)
+            )
+            eventBus.publish(documentSeen)
+        }
     }
 
     fun signDocument(
         protocolKey: String,
-        encryptedSecret: Encrypted<String>,
         signerPubKey: PublicKey,
         context: RequestContext,
         editorAppHash: HashCode,
         documentHash: HashCode,
         editorUri: String,
         browser: Encrypted<BrowserData>
-    ): Protocol {
-
-        val protocol = storage.getProtocol(protocolKey)
+    ) = changeProtocol(protocolKey) { protocol ->
         val signer = protocol.signers.first { it.pubKey == signerPubKey }
 
-        checkStatusAndSecret(signer, encryptedSecret)
+        checkStatusAndSecret(signer)
 
-        signer.signature = encrypt(
-            protocol.protocolAccessPubKey, testify(
+        signer.signature = crypto.encrypt(
+            protocol.protocolAccessPubKey, crypto.testify(
                 DocumentSignature(
                     context.ipAddress,
                     signerPubKey,
-                    encryptedSecret,
                     documentHash,
                     editorAppHash,
                     editorUri,
                     browser
-                )
+                ), witnessKeyPair
             )
         )
-
-        storage.saveProtocol(protocol)
-
         eventBus.publish(DocumentSignedEvent(signer.pubKey))
+    }
+
+    private fun changeProtocol(protocolKey: String, function: (Protocol) -> Unit): Protocol {
+        val protocol = storage.getProtocol(protocolKey)
+        function.invoke(protocol)
+        storage.saveProtocol(protocol)
         return protocol
     }
 
-    private fun checkStatusAndSecret(signer: Signer, encryptedSecret: Encrypted<String>) {
+    private fun checkStatusAndSecret(signer: Signer, encryptedSecret: Encrypted<String>? = null) {
         if (signer.getStatus() != SignerStatus.SIGNATURE_REQUESTED && signer.getStatus() != SignerStatus.DOCUMENT_SEEN) {
             throw BadStateException("Signer has wrong state for download operation (${signer.getStatus()})")
         }
-        if (signer.signingRequestTransmission!!.content.secret != decrypt(encryptedSecret, signer.pubKey)) {
+        if (encryptedSecret != null && signer.signingRequestTransmission!!.content.secret != crypto.decrypt(
+                encryptedSecret,
+                signer.pubKey
+            )
+        ) {
             throw AuthorizationException("Bad secret")
         }
     }
@@ -185,8 +181,4 @@ class Implementation(
 /*
 * EVENTS: -------------------------------
  */
-
-
-class DocumentSignedEvent(pubKey: PublicKey) {
-
-}
+class DocumentSignedEvent(pubKey: PublicKey)

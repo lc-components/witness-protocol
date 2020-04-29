@@ -1,5 +1,10 @@
 package de.bcoding.ltc.witness.model
 
+import de.bcoding.ltc.witness.serialization.Data
+import kotlinx.serialization.*
+import kotlin.reflect.KClass
+
+@Serializable
 class Protocol(
     val key: String,
     val protocolAccessPubKey: PublicKey,
@@ -9,17 +14,35 @@ class Protocol(
     val creation: Encrypted<Testified<ProtocolCreation>>
 )
 
-class Witness(val keyPair: KeyPair)
-class Document(val data: ByteArray) : Data {
-    override fun toByteArray(): ByteArray {
-        return data
+class ExtendedSerializer : KSerializer<Protocol> {
+    private val delegate = Protocol.serializer()
+
+    override val descriptor: SerialDescriptor
+        get() = delegate.descriptor
+
+    override fun deserialize(decoder: Decoder): Protocol {
+        val protocol = delegate.deserialize(decoder)
+        protocol.document.type = Document::class
+        protocol.signers.forEach {
+            it.documentSeen?.type = Testified::class as KClass<Testified<DocumentSeen>>
+        }
+        protocol.creation.type = Testified::class as KClass<Testified<ProtocolCreation>>
+        return protocol
     }
+
+    override fun serialize(encoder: Encoder, obj: Protocol) {
+        delegate.serialize(encoder, obj)
+    }
+
 }
 
-interface Data {
-    fun toByteArray() : ByteArray
-}
+@Serializable
+class Witness(val pubKey: PublicKey)
 
+@Serializable
+class Document(val data: Data)
+
+@Serializable
 class Signer(
     val email: String,
     val pubKey: PublicKey,
@@ -51,4 +74,5 @@ enum class SignerStatus {
     INITIAL, SIGNATURE_REQUESTED, DOCUMENT_SEEN, DONE
 }
 
+@Serializable
 class PersonData(val firstName: String, val lastName: String, val company: String)
